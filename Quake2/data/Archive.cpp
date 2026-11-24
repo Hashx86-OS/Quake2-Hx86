@@ -138,7 +138,7 @@ bool FinishSha(ShaSink* sink, char output[65]) {
 void UpdateProgress(ShaSink* sink, const char* label) {
     if (sink->progress == nullptr) return;
     if (sink->expected == 0 || sink->received < sink->nextProgress) return;
-    uint32_t percent = (sink->received * 100u) / sink->expected;
+    uint32_t percent = (uint32_t)(((uint64_t)sink->received * 100u) / sink->expected);
     char text[160];
     StoreFormat(text, sizeof(text), "%s: %u / %u KB (%u%%)", label, sink->received / 1024u,
                 sink->expected / 1024u, percent);
