@@ -62,6 +62,7 @@ struct ArchivePaths {
     char baseDir[kPathCapacity];
     char sharewareDir[kPathCapacity];
     char licensesDir[kPathCapacity];
+    char playersDir[kPathCapacity];
     char demoPath[kPathCapacity];
     char demoPartPath[kPathCapacity];
     char pakPath[kPathCapacity];
@@ -87,6 +88,7 @@ void BuildPaths(const char* baseDir, ArchivePaths* paths) {
     StoreStrCopy(paths->baseDir, sizeof(paths->baseDir), baseDir);
     JoinPath(paths->sharewareDir, sizeof(paths->sharewareDir), baseDir, "shareware");
     JoinPath(paths->licensesDir, sizeof(paths->licensesDir), baseDir, "licenses");
+    JoinPath(paths->playersDir, sizeof(paths->playersDir), baseDir, "players");
     JoinPath(paths->demoPath, sizeof(paths->demoPath), paths->sharewareDir,
              "q2-314-demo-x86.exe");
     JoinPath(paths->demoPartPath, sizeof(paths->demoPartPath), paths->sharewareDir,
@@ -281,20 +283,18 @@ bool ExtractZipMember(mz_zip_archive* zip, const char* member, const char* partP
 bool EnsureDirTree(const char* path) {
     char buffer[kPathCapacity];
     if (!StoreStrCopy(buffer, sizeof(buffer), path)) return false;
+
+    // FatFs returns FR_EXIST for directories that already exist, and a
+    // directory may be present before stat() sees it reliably. Creation is
+    // therefore best-effort; a genuinely missing parent will fail when the
+    // player file is opened below.
     for (uint32_t i = 1; buffer[i] != '\0'; i++) {
         if (buffer[i] != '/') continue;
         buffer[i] = '\0';
-        int32_t result = syscall_mkdir(buffer, 0777);
+        if (!StoreDirExists(buffer)) syscall_mkdir(buffer, 0777);
         buffer[i] = '/';
-        if (result < 0) {
-            struct stat st;
-            if (syscall_stat(buffer, &st) != 0) return false;
-        }
     }
-    if (syscall_mkdir(buffer, 0777) < 0) {
-        struct stat st;
-        if (syscall_stat(buffer, &st) != 0) return false;
-    }
+    if (!StoreDirExists(buffer)) syscall_mkdir(buffer, 0777);
     return true;
 }
 
@@ -329,10 +329,8 @@ bool ExtractPlayers(mz_zip_archive* zip, const ArchivePaths* paths, ArchiveProgr
             return false;
         }
 
-        char playersDir[kPathCapacity];
-        JoinPath(playersDir, sizeof(playersDir), paths->baseDir, "players");
         char playerPath[kPathCapacity];
-        JoinPath(playerPath, sizeof(playerPath), playersDir, relative);
+        JoinPath(playerPath, sizeof(playerPath), paths->playersDir, relative);
         char directory[kPathCapacity];
         StoreStrCopy(directory, sizeof(directory), playerPath);
         char* slash = nullptr;
@@ -403,7 +401,8 @@ bool ArchiveInstallSharewareData(const char* baseDir, ArchiveProgress progress, 
     ArchivePaths paths = {};
     BuildPaths(baseDir, &paths);
 
-    if (StoreFileExists(paths.pakPath, nullptr)) {
+    if (StoreFileExists(paths.pakPath, nullptr) &&
+        StoreFileExists(paths.licensePath, nullptr) && StoreDirExists(paths.playersDir)) {
         Report(progress, "Game data is already installed.");
         return true;
     }
@@ -414,10 +413,15 @@ bool ArchiveInstallSharewareData(const char* baseDir, ArchiveProgress progress, 
         return false;
     }
 
-    Report(progress, "Downloading the Quake II demo archive...");
-    if (!DownloadFile(kDemoUrl, paths.demoPartPath, paths.demoPath, kDemoSize, kDemoHash,
-                      "Downloading demo archive", progress, error, errorCapacity)) {
-        return false;
+    uint32_t demoSize = 0;
+    if (!StoreFileExists(paths.demoPath, &demoSize) || demoSize != kDemoSize) {
+        Report(progress, "Downloading the Quake II demo archive...");
+        if (!DownloadFile(kDemoUrl, paths.demoPartPath, paths.demoPath, kDemoSize, kDemoHash,
+                          "Downloading demo archive", progress, error, errorCapacity)) {
+            return false;
+        }
+    } else {
+        Report(progress, "Using the downloaded demo archive...");
     }
 
     int32_t demoFd = syscall_open(paths.demoPath, O_RDONLY);

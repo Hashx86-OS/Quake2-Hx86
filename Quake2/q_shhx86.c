@@ -26,11 +26,9 @@ void *Hunk_Alloc(int size) {
 }
 
 int Hunk_End(void) {
-    byte *n;
-    n = (byte*)krealloc(membase, curhunksize + sizeof(int));
-    if (n != membase) {
-        Sys_Error("Hunk_End: krealloc moved the block!");
-    }
+    // libhx86's krealloc always allocates a new block, which would invalidate
+    // every pointer returned by Hunk_Alloc(). Keep the maximum-size block and
+    // record the used size instead; Hunk_Free() releases it later.
     *(int*)membase = curhunksize;
     return curhunksize;
 }
