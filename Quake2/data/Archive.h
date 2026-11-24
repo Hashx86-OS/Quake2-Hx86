@@ -31,6 +31,14 @@
 typedef void (*ArchiveProgress)(const char* text);
 
 /**
+ * ArchiveSharewareDataInstalled() - Test whether a complete data install exists.
+ *
+ * Return: true when the installation marker, pak0.pak, license, and player
+ *         directory from a previous completed run are all present.
+ */
+bool ArchiveSharewareDataInstalled(const char* baseDir);
+
+/**
  * ArchiveInstallSharewareData() - Download and install Quake II demo data.
  *
  * @baseDir is the Quake II base directory (normally "/baseq2"). Downloads the

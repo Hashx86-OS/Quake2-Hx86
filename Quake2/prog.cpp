@@ -24,11 +24,6 @@ static Button* g_exitButton = nullptr;
 static volatile bool g_installDone = false;
 static bool g_busy = false;
 
-static bool pak_file_exists(const char* path) {
-    struct stat st;
-    return syscall_stat(path, &st) == 0;
-}
-
 static void OnExitClicked() {
     syscall_exit_group(1);
 }
@@ -76,7 +71,7 @@ static void ShowMissingPakDialog(const char* pakpath) {
     g_dialog = new Window(desktop, 160, 150, 560, 340);
     g_dialog->setWindowTitle("Quake II - Game Data Required");
 
-    Label* title = new Label(g_dialog, 20, 20, 520, 30, "pak0.pak not found.");
+    Label* title = new Label(g_dialog, 20, 20, 520, 30, "Game data is incomplete.");
     title->setSize(MEDIUM);
 
     char expectedText[400];
@@ -136,10 +131,10 @@ extern "C" void _start(void* arg) {
 
     char pakpath[64];
     sprintf(pakpath, "%s/pak0.pak", kBaseDir);
-    if (!pak_file_exists(pakpath)) {
-        printf("[Quake2] %s not found\n", pakpath);
+    if (!ArchiveSharewareDataInstalled(kBaseDir)) {
+        printf("[Quake2] Quake II game data is incomplete\n");
         ShowMissingPakDialog(pakpath);
-        if (!pak_file_exists(pakpath)) {
+        if (!ArchiveSharewareDataInstalled(kBaseDir)) {
             printf("[Quake2] Game data is still missing, exiting\n");
             syscall_exit(1);
         }

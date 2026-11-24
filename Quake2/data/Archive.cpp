@@ -56,6 +56,7 @@ constexpr const char* kLicenseHash =
     "5d23d6248e292d810d4925a6ec32ca5b179a20d4273a73638b11fbd12e4c11d0";
 
 constexpr const char* kPlayersPrefix = "Install/Data/baseq2/players/";
+constexpr const char* kMarkerText = "hx86-q2-data-v1\n";
 constexpr uint32_t kPathCapacity = 320;
 
 struct ArchivePaths {
@@ -69,6 +70,7 @@ struct ArchivePaths {
     char pakPartPath[kPathCapacity];
     char licensePath[kPathCapacity];
     char licensePartPath[kPathCapacity];
+    char markerPath[kPathCapacity];
 };
 
 void JoinPath(char* output, uint32_t capacity, const char* base, const char* leaf) {
@@ -99,6 +101,7 @@ void BuildPaths(const char* baseDir, ArchivePaths* paths) {
              "QUAKE2LIC.TXT");
     JoinPath(paths->licensePartPath, sizeof(paths->licensePartPath), paths->licensesDir,
              "QUAKE2LIC.TXT.part");
+    JoinPath(paths->markerPath, sizeof(paths->markerPath), baseDir, ".q2data");
 }
 
 struct ShaSink {
@@ -246,6 +249,14 @@ bool ExtractZipMember(mz_zip_archive* zip, const char* member, const char* partP
         return false;
     }
 
+    // Files only reach their final name after the size and SHA-256 checks
+    // pass, so an existing file of the right size is a completed extraction.
+    uint32_t existingSize = 0;
+    if (StoreFileExists(finalPath, &existingSize) && existingSize == expectedSize) {
+        Report(progress, "Using the already extracted game data...");
+        return true;
+    }
+
     int32_t fd = syscall_open(partPath, O_WRONLY | O_CREAT | O_TRUNC);
     if (fd < 0) {
         StoreFormat(error, errorCapacity, "could not create %s", partPath);
@@ -312,10 +323,21 @@ bool ExtractPlayers(mz_zip_archive* zip, const ArchivePaths* paths, ArchiveProgr
                     char* error, uint32_t errorCapacity) {
     Report(progress, "Extracting player models...");
     mz_uint count = mz_zip_reader_get_num_files(zip);
+    uint32_t playerEntries = 0;
     uint32_t extracted = 0;
     for (mz_uint i = 0; i < count; i++) {
         mz_zip_archive_file_stat stat = {};
-        if (!mz_zip_reader_file_stat(zip, i, &stat) || stat.m_filename == nullptr) continue;
+        // A failure here used to be skipped silently, which could leave a
+        // partial player set that still looked installed. Report it instead.
+        if (!mz_zip_reader_file_stat(zip, i, &stat)) {
+            StoreFormat(error, errorCapacity, "could not read archive entry %u (error %d)", i,
+                        (int)mz_zip_get_last_error(zip));
+            return false;
+        }
+        if (stat.m_filename == nullptr) {
+            StoreFormat(error, errorCapacity, "archive entry %u has no file name", i);
+            return false;
+        }
 
         char normalized[kPathCapacity];
         if (!StoreStrCopy(normalized, sizeof(normalized), stat.m_filename)) continue;
@@ -344,6 +366,16 @@ bool ExtractPlayers(mz_zip_archive* zip, const ArchivePaths* paths, ArchiveProgr
             return false;
         }
         *slash = '/';
+        playerEntries++;
+
+        // Completed player files were renamed into place only after their
+        // checks passed, so an existing file of the right size can be reused.
+        uint32_t existingSize = 0;
+        if (StoreFileExists(playerPath, &existingSize) &&
+            existingSize == (uint32_t)stat.m_uncomp_size) {
+            extracted++;
+            continue;
+        }
 
         char partPath[kPathCapacity + 5];
         if (!StoreStrCopy(partPath, sizeof(partPath), playerPath) ||
@@ -353,6 +385,12 @@ bool ExtractPlayers(mz_zip_archive* zip, const ArchivePaths* paths, ArchiveProgr
             return false;
         }
         int32_t fd = syscall_open(partPath, O_WRONLY | O_CREAT | O_TRUNC);
+        if (fd < 0) {
+            // FatFs can report FR_NO_PATH for a directory that was just
+            // created. Retry once with a fresh directory check.
+            EnsureDirTree(directory);
+            fd = syscall_open(partPath, O_WRONLY | O_CREAT | O_TRUNC);
+        }
         if (fd < 0) {
             StoreFormat(error, errorCapacity, "could not create %s", partPath);
             return false;
@@ -381,14 +419,29 @@ bool ExtractPlayers(mz_zip_archive* zip, const ArchivePaths* paths, ArchiveProgr
         }
         extracted++;
     }
-    if (extracted == 0) {
+    if (playerEntries == 0) {
         SetError(error, errorCapacity, "player models are missing from the demo archive");
+        return false;
+    }
+    if (extracted != playerEntries) {
+        StoreFormat(error, errorCapacity, "only %u of %u player files were extracted", extracted,
+                    playerEntries);
         return false;
     }
     return true;
 }
 
 }  // namespace
+
+bool ArchiveSharewareDataInstalled(const char* baseDir) {
+    if (baseDir == nullptr || baseDir[0] == '\0') return false;
+    ArchivePaths paths = {};
+    BuildPaths(baseDir, &paths);
+    return StoreFileExists(paths.markerPath, nullptr) &&
+           StoreFileExists(paths.pakPath, nullptr) &&
+           StoreFileExists(paths.licensePath, nullptr) &&
+           StoreDirExists(paths.playersDir);
+}
 
 bool ArchiveInstallSharewareData(const char* baseDir, ArchiveProgress progress, char* error,
                                  uint32_t errorCapacity) {
@@ -401,7 +454,8 @@ bool ArchiveInstallSharewareData(const char* baseDir, ArchiveProgress progress, 
     ArchivePaths paths = {};
     BuildPaths(baseDir, &paths);
 
-    if (StoreFileExists(paths.pakPath, nullptr) &&
+    if (StoreFileExists(paths.markerPath, nullptr) &&
+        StoreFileExists(paths.pakPath, nullptr) &&
         StoreFileExists(paths.licensePath, nullptr) && StoreDirExists(paths.playersDir)) {
         Report(progress, "Game data is already installed.");
         return true;
@@ -453,6 +507,15 @@ bool ArchiveInstallSharewareData(const char* baseDir, ArchiveProgress progress, 
     mz_zip_reader_end(&zip);
     syscall_close((uint32_t)demoFd);
     if (!ok) return false;
+
+    // The marker is written last, so an interrupted install is retried and
+    // keeps the files that were already completed.
+    int32_t markerFd = syscall_open(paths.markerPath, O_WRONLY | O_CREAT | O_TRUNC);
+    if (markerFd >= 0) {
+        StoreWriteAll(markerFd, (const uint8_t*)kMarkerText,
+                      StoreStrLen(kMarkerText));
+        syscall_close((uint32_t)markerFd);
+    }
 
     Report(progress, "Quake II shareware data installed.");
     return true;

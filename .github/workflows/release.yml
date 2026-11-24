@@ -2,7 +2,7 @@ name: Automated Release Build
 
 on:
   push:
-    branches: ["main"]
+    branches: ["hx86-port"]
     tags:
       - "v*"
   workflow_dispatch:
