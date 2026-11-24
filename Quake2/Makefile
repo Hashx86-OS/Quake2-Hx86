@@ -91,7 +91,7 @@ ARCHIVE_C = \
 
 NULL_SRC = \
 	$(ENGINE_DIR)/null/cd_null.c \
-	$(ENGINE_DIR)/null/snddma_null.c
+	$(ENGINE_DIR)/null/snddma_hx86.c
 
 # Game module (statically linked)
 GAME_SRC = \

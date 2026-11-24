@@ -4,9 +4,16 @@ Port of the Quake II engine to the [Hashx86 OS](https://github.com/Hashx86-OS/Ha
 
 ## Status
 
-Software renderer, keyboard + mouse input, no sound. Runs single-player. The
-app can download and install id Software's original Quake II 3.14 shareware
-demo data on first launch.
+Software renderer, keyboard + mouse input, 44.1 kHz stereo sound through the
+Hashx86 AC97 mixer, and no CD music. Runs single-player. The app can download
+and install id Software's original Quake II 3.14 shareware demo data on first
+launch.
+
+## Audio
+
+Sound effects use the Hx86 streaming audio ring at 44.1 kHz, 16-bit stereo.
+It requires the kernel's AC97 driver; without an AC97 device the game falls
+back to silent operation. CD music is not implemented.
 
 ## Prerequisites
 
@@ -60,7 +67,7 @@ disk image.
 | `Quake2/engine/qcommon/` | Common code (filesystem, cvars, commands) |
 | `Quake2/engine/ref_soft/` | Software renderer |
 | `Quake2/engine/game/` | Game logic (statically linked) |
-| `Quake2/engine/null/` | Null sound/CD drivers |
+| `Quake2/engine/null/` | CD null driver and Hashx86 audio backend |
 | `Quake2/prog.cpp` | Entry point and shareware installer UI |
 | `Quake2/data/Archive.*` | Quake II demo download and extraction |
 | `Quake2/data/HttpClient.*` | HTTPS client (mbedTLS) |
