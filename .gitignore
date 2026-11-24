@@ -1,0 +1,4 @@
+/build/
+*.o
+*.a
+Quake2/test_size

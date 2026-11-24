@@ -1,0 +1,63 @@
+name: Automated Release Build
+
+on:
+  push:
+    branches: ["main"]
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      libhx86_ref:
+        description: Hashx86-OS commit or tag to build libhx86 from
+        required: false
+        type: string
+
+env:
+  LIBHX86_REF: ${{ github.event.inputs.libhx86_ref || vars.LIBHX86_REF || 'dev' }}
+
+jobs:
+  build-and-release:
+    name: Build and Create Release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Checkout Hashx86 libhx86
+        uses: actions/checkout@v4
+        with:
+          repository: Hashx86-OS/Hashx86-OS
+          ref: ${{ env.LIBHX86_REF }}
+          path: kernel
+          sparse-checkout: |
+            user_prog/libhx86
+            user_prog/libmbedtls
+            include
+            third_party/mbedtls
+          persist-credentials: false
+
+      - name: Install C++ Compiler and Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc g++ gcc-multilib g++-multilib make binutils
+
+      - name: Build Quake2-HX86
+        run: make -j"$(nproc)" KERNEL_DIR="$GITHUB_WORKSPACE/kernel"
+
+      - name: Verify Build Output
+        run: |
+          test -s build/Quake2.bin
+          file build/Quake2.bin
+          sha256sum build/Quake2.bin | tee build/SHA256SUMS
+
+      - name: Create GitHub Release and Upload Artifact
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build/Quake2.bin
+            build/SHA256SUMS
+          generate_release_notes: true
