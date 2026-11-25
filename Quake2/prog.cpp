@@ -136,7 +136,7 @@ extern "C" void _start(void* arg) {
         ShowMissingPakDialog(pakpath);
         if (!ArchiveSharewareDataInstalled(kBaseDir)) {
             printf("[Quake2] Game data is still missing, exiting\n");
-            syscall_exit(1);
+            syscall_exit_group(1);
         }
     }
 

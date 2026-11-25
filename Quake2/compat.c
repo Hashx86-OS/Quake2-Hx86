@@ -914,7 +914,10 @@ __attribute__((used)) void longjmp(jmp_buf env, int val) {
 }
 
 void exit(int status) {
-    syscall_exit(status);
+    // Quit the whole process, not just the calling thread: the GUI event
+    // handler thread from the download dialog must not keep the process (and
+    // its fullscreen screen lock) alive.
+    syscall_exit_group(status);
 }
 
 void perror(const char *s) {
@@ -972,7 +975,7 @@ int putenv(char *string) {
 
 __attribute__((used)) void __assert_fail(const char *assertion, const char *file, unsigned int line, const char *function) {
     printf("Assertion failed: %s, file %s, line %d, function %s\n", assertion, file, line, function);
-    syscall_exit(1);
+    syscall_exit_group(1);
 }
 
 void *memset(void *s, int c, size_t n) {
