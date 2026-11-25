@@ -148,14 +148,21 @@ void Sys_EditFile(char *filename) {
     (void)filename;
 }
 
-static uint64_t sys_time_base_int = 0;
+// Kernel PIT-based millisecond clock (Hsys 15). A raw TSC is scaled by a
+// fixed constant in the generic code, but the TSC frequency is host-specific.
+#define HX86_HSYS_GET_TIME_MS 15
+
+static int32_t HxTimeMs(void) {
+    int32_t result = 0;
+    __asm__ __volatile__("int $0x80"
+                         : "=a"(result)
+                         : "a"(sys_Hcall), "b"(HX86_HSYS_GET_TIME_MS)
+                         : "memory");
+    return result;
+}
 
 int Sys_Milliseconds(void) {
-    uint32_t lo, hi;
-    __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
-    uint64_t t = ((uint64_t)hi << 32) | lo;
-    uint64_t diff = t - sys_time_base_int;
-    return (int)(diff >> 20);
+    return HxTimeMs();
 }
 
 void Sys_Sleep(void) {
@@ -167,9 +174,6 @@ char *Sys_ConsoleInput(void) {
 }
 
 void Sys_Init(void) {
-    uint32_t lo, hi;
-    __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
-    sys_time_base_int = ((uint64_t)hi << 32) | lo;
 }
 
 void Sys_Quit(void) {
