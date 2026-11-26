@@ -205,14 +205,19 @@ int TlsRecv(void* context, unsigned char* data, size_t length) {
     int32_t fd = g_socketFd;
     if (fd < 0) return MBEDTLS_ERR_NET_RECV_FAILED;
 
-    // A zero-length result from the kernel socket is not always a peer close:
-    // lwIP can report an empty queue before the next TLS record arrives. Poll
-    // for a bounded interval so a slow ServerHello or HTTP response is not
-    // mistaken for EOF, while a genuinely closed peer still times out.
     uint32_t want = length > kHnetChunk ? kHnetChunk : (uint32_t)length;
-    int result = Hnet::Recv(fd, data, want, 0);
-    if (result < 0) return MBEDTLS_ERR_NET_RECV_FAILED;
-    return result;
+    uint32_t start = syscall_get_time_ms();
+    for (;;) {
+        int result = Hnet::Recv(fd, data, want, Hnet::MSG_DONTWAIT);
+        if (result >= 0) return result;
+        if (result != -2) return MBEDTLS_ERR_NET_RECV_FAILED;
+        if ((uint32_t)(syscall_get_time_ms() - start) >= 60000u) {
+            Hnet::Close(fd);
+            g_socketFd = -1;
+            return MBEDTLS_ERR_SSL_TIMEOUT;
+        }
+        syscall_sleep(1);
+    }
 }
 
 bool TlsEnsureReady(char* error, uint32_t errorCapacity) {
@@ -467,7 +472,8 @@ bool HeaderNameEquals(const char* line, const char* name) {
 }
 
 bool ReadHeaders(Reader* reader, int32_t* status, bool* chunked, bool* hasLength,
-                 uint32_t* contentLength, char* location, uint32_t locationCapacity, char* error,
+                 uint32_t* contentLength, char* location, uint32_t locationCapacity,
+                 char* contentRange, uint32_t rangeCapacity, char* error,
                  uint32_t errorCapacity) {
     char line[4096];
     if (!ReaderReadLine(reader, line, sizeof(line))) {
@@ -483,6 +489,7 @@ bool ReadHeaders(Reader* reader, int32_t* status, bool* chunked, bool* hasLength
     *hasLength = false;
     *contentLength = 0;
     location[0] = '\0';
+    contentRange[0] = '\0';
 
     for (;;) {
         if (!ReaderReadLine(reader, line, sizeof(line))) {
@@ -503,6 +510,11 @@ bool ReadHeaders(Reader* reader, int32_t* status, bool* chunked, bool* hasLength
                 return false;
             }
             *hasLength = true;
+        } else if (HeaderNameEquals(line, "content-range")) {
+            if (contentRange[0] != '\0' || !StoreStrCopy(contentRange, rangeCapacity, text)) {
+                SetError(error, errorCapacity, "Invalid Content-Range");
+                return false;
+            }
         } else if (HeaderNameEquals(line, "transfer-encoding")) {
             if (ContainsCase(text, "chunked")) *chunked = true;
         } else if (HeaderNameEquals(line, "location")) {
@@ -615,7 +627,15 @@ bool ReadFixedBody(Reader* reader, uint32_t length, StoreBodySink sink, void* co
         uint32_t want = remaining < sizeof(buffer) ? remaining : sizeof(buffer);
         uint32_t got = ReaderReadSome(reader, buffer, want);
         if (got == 0) {
-            SetError(error, errorCapacity, "Truncated HTTP body");
+            printf("[HTTP] body interrupted: %u / %u bytes, TLS error %d, EOF %u\n",
+                   length - remaining, length, reader->error, reader->eof ? 1u : 0u);
+            if (reader->error != 0) {
+                StoreFormat(error, errorCapacity, "TLS read failed: %d after %u / %u bytes",
+                            reader->error, length - remaining, length);
+            } else {
+                StoreFormat(error, errorCapacity, "Truncated HTTP body: %u / %u bytes",
+                            length - remaining, length);
+            }
             return false;
         }
         if (sink != nullptr && !sink(context, buffer, got)) {
@@ -646,7 +666,38 @@ bool ReadUntilEof(Reader* reader, StoreBodySink sink, void* context, char* error
     }
 }
 
-bool SendRequest(const ParsedUrl& url, const char* accept, char* error, uint32_t errorCapacity) {
+bool ReadRangeNumber(const char** cursor, uint32_t* number) {
+    const char* p = *cursor;
+    if (*p < '0' || *p > '9') return false;
+    uint32_t value = 0;
+    while (*p >= '0' && *p <= '9') {
+        uint32_t digit = (uint32_t)(*p++ - '0');
+        if (value > (0xFFFFFFFFu - digit) / 10u) return false;
+        value = value * 10u + digit;
+    }
+    *number = value;
+    *cursor = p;
+    return true;
+}
+
+bool ValidateResumeResponse(int32_t status, const char* range, uint32_t offset,
+                            uint32_t total, bool hasLength, uint32_t length) {
+    if (offset == 0) return status != 206 &&
+        (total == 0 || !hasLength || length == total);
+    if (status != 206 || total == 0 || offset >= total ||
+        !StoreStrStartsWithCase(range, "bytes ")) return false;
+    const char* p = range + 6;
+    uint32_t first, last, size;
+    if (!ReadRangeNumber(&p, &first) || *p++ != '-' ||
+        !ReadRangeNumber(&p, &last) || *p++ != '/' ||
+        !ReadRangeNumber(&p, &size)) return false;
+    while (*p == ' ' || *p == '\t') p++;
+    return *p == '\0' && first == offset && size == total && last == total - 1 &&
+           (!hasLength || length == total - offset);
+}
+
+bool SendRequest(const ParsedUrl& url, const char* accept, char* error, uint32_t errorCapacity,
+                  uint32_t resumeOffset) {
     char authority[160];
     if (url.port == 443) {
         StoreStrCopy(authority, sizeof(authority), url.host);
@@ -654,6 +705,8 @@ bool SendRequest(const ParsedUrl& url, const char* accept, char* error, uint32_t
         StoreFormat(authority, sizeof(authority), "%s:%u", url.host, url.port);
     }
 
+    char range[64] = {};
+    if (resumeOffset != 0) StoreFormat(range, sizeof(range), "Range: bytes=%u-\r\n", resumeOffset);
     char request[4096];
     StoreFormat(request, sizeof(request),
                 "GET %s HTTP/1.1\r\n"
@@ -661,9 +714,10 @@ bool SendRequest(const ParsedUrl& url, const char* accept, char* error, uint32_t
                 "User-Agent: Hashx86-AppStore/0.1\r\n"
                 "Accept: %s\r\n"
                 "Accept-Encoding: identity\r\n"
+                "%s"
                 "Connection: close\r\n"
                 "\r\n",
-                url.path, authority, accept != nullptr ? accept : "*/*");
+                url.path, authority, accept != nullptr ? accept : "*/*", range);
 
     uint32_t length = StoreStrLen(request);
     if (length == 0 || length == sizeof(request) - 1) {
@@ -688,7 +742,8 @@ bool RetrySink(void* context, const uint8_t* data, uint32_t length) {
 }  // namespace
 
 static bool StoreHttpGetOnce(const char* url, const char* accept, StoreBodySink sink, void* context,
-                             StoreHttpResponse* response, char* error, uint32_t errorCapacity) {
+                             StoreHttpResponse* response, char* error, uint32_t errorCapacity,
+                             uint32_t resumeOffset, uint32_t expectedTotal) {
     if (error != nullptr && errorCapacity != 0) error[0] = '\0';
     if (response != nullptr) {
         response->status = 0;
@@ -716,7 +771,7 @@ static bool StoreHttpGetOnce(const char* url, const char* accept, StoreBodySink 
 
         printf("[HTTP] GET %s\n", currentUrl);
         if (!TlsOpen(parsed, error, errorCapacity)) return false;
-        if (!SendRequest(parsed, accept, error, errorCapacity)) {
+        if (!SendRequest(parsed, accept, error, errorCapacity, resumeOffset)) {
             TlsClose();
             return false;
         }
@@ -727,8 +782,9 @@ static bool StoreHttpGetOnce(const char* url, const char* accept, StoreBodySink 
         bool hasLength = false;
         uint32_t contentLength = 0;
         char location[kMaxUrl];
+        char contentRange[128];
         if (!ReadHeaders(&reader, &status, &chunked, &hasLength, &contentLength, location,
-                         sizeof(location), error, errorCapacity)) {
+                         sizeof(location), contentRange, sizeof(contentRange), error, errorCapacity)) {
             TlsClose();
             return false;
         }
@@ -753,6 +809,13 @@ static bool StoreHttpGetOnce(const char* url, const char* accept, StoreBodySink 
 
         if (status < 200 || status >= 300) {
             SetErrorCode(error, errorCapacity, "HTTP status", status);
+            TlsClose();
+            return false;
+        }
+
+        if (!ValidateResumeResponse(status, contentRange, resumeOffset, expectedTotal,
+                                    hasLength, contentLength)) {
+            SetError(error, errorCapacity, "Server returned an invalid download range or size");
             TlsClose();
             return false;
         }
@@ -782,12 +845,14 @@ static bool StoreHttpGetOnce(const char* url, const char* accept, StoreBodySink 
 }
 
 bool StoreHttpGet(const char* url, const char* accept, StoreBodySink sink, void* context,
-                  StoreHttpResponse* response, char* error, uint32_t errorCapacity) {
+                  StoreHttpResponse* response, char* error, uint32_t errorCapacity,
+                  uint32_t resumeOffset, uint32_t expectedTotal) {
     // Retry connection/handshake failures, but never replay a request once the
     // body sink has seen bytes: that would corrupt the file or SHA-256 state.
     for (int attempt = 0; attempt < 8; attempt++) {
         RetrySinkContext retry = {sink, context, false};
-        if (StoreHttpGetOnce(url, accept, RetrySink, &retry, response, error, errorCapacity)) {
+        if (StoreHttpGetOnce(url, accept, RetrySink, &retry, response, error, errorCapacity,
+                             resumeOffset, expectedTotal)) {
             return true;
         }
         if (retry.received) return false;

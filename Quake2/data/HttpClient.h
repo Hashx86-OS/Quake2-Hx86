@@ -43,10 +43,13 @@ struct StoreHttpResponse {
  *
  * Only https:// URLs are accepted. The response body is passed to @sink in
  * order; redirect responses are consumed internally and never reach the sink.
+ * A nonzero resumeOffset requires a matching 206 Content-Range for expectedTotal
+ * before any bytes reach the sink. Callers must verify the complete file hash.
  *
  * Return: true when a final 2xx response body was read, false on error.
  */
 bool StoreHttpGet(const char* url, const char* accept, StoreBodySink sink, void* context,
-                  StoreHttpResponse* response, char* error, uint32_t errorCapacity);
+                  StoreHttpResponse* response, char* error, uint32_t errorCapacity,
+                  uint32_t resumeOffset = 0, uint32_t expectedTotal = 0);
 
 #endif  // APPSTORE_HTTPCLIENT_H

@@ -28,6 +28,7 @@
 #include "StoreUtil.h"
 
 #include <Hx86/Hsyscalls/syscalls.h>
+#include <Hx86/Hx86.h>
 #include <Hx86/debug.h>
 #include <mbedtls/sha256.h>
 
@@ -110,6 +111,7 @@ struct ShaSink {
     uint32_t received;
     uint32_t expected;
     uint32_t nextProgress;
+    bool failed;
     ArchiveProgress progress;
     const char* label;
 };
@@ -153,8 +155,12 @@ void UpdateProgress(ShaSink* sink, const char* label) {
 
 bool DownloadSink(void* context, const uint8_t* data, uint32_t length) {
     ShaSink* sink = static_cast<ShaSink*>(context);
-    if (!StoreWriteAll(sink->fd, data, length)) return false;
-    if (mbedtls_sha256_update_ret(&sink->sha, data, length) != 0) return false;
+    if (sink->received > sink->expected || length > sink->expected - sink->received ||
+        !StoreWriteAll(sink->fd, data, length) ||
+        mbedtls_sha256_update_ret(&sink->sha, data, length) != 0) {
+        sink->failed = true;
+        return false;
+    }
     sink->received += length;
     UpdateProgress(sink, sink->label);
     return true;
@@ -190,7 +196,19 @@ bool DownloadFile(const char* url, const char* partPath, const char* finalPath,
     }
 
     StoreHttpResponse response = {};
-    bool ok = StoreHttpGet(url, "*/*", DownloadSink, &sink, &response, error, errorCapacity);
+    bool ok = false;
+    for (uint32_t attempt = 0; attempt < 4; attempt++) {
+        uint32_t offset = sink.received;
+        ok = StoreHttpGet(url, "*/*", DownloadSink, &sink, &response, error, errorCapacity,
+                          offset, expectedSize);
+        if (ok || sink.failed || sink.received == 0 || sink.received >= expectedSize) break;
+        if (attempt < 3) {
+            printf("[Quake2] download interrupted at %u / %u bytes: %s\n",
+                   sink.received, expectedSize, error);
+            Report(progress, "Download interrupted; resuming...");
+            syscall_sleep(1000);
+        }
+    }
     char digest[65];
     bool hashOk = FinishSha(&sink, digest);
     syscall_close((uint32_t)fd);
